@@ -15,6 +15,7 @@ import ddddocr
 import onnxruntime
 import requests
 import seleniumwire.webdriver as webdriver
+from selenium.webdriver.remote.webdriver import WebDriver
 from requests.exceptions import ConnectionError
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -31,7 +32,7 @@ from webdriver_manager.microsoft import EdgeChromiumDriverManager
 
 PASSWORD_INPUT = True
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = osp.dirname(os.path.abspath(__file__))
 INI_PATH = osp.join(ROOT, "config.ini")
 JW_COOKIES_PATH = osp.join(ROOT, "jw_cookies.pkl")
 V_COOKIES_PATH = osp.join(ROOT, "v_cookies.pkl")
@@ -50,7 +51,7 @@ def private_info(self, message, *args, **kws):
         self._log(PRIVATE_INFO, message, args, **kws)
 
 
-logging.Logger.private_info = private_info
+logging.Logger.private_info = private_info  # type: ignore
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 console_hd = logging.StreamHandler()
@@ -103,14 +104,13 @@ class RUC_LOGIN:
     and it often makes obvious mistakes, we can recognize the code in advance and manually refresh a code.
     """
 
-    driver: webdriver.Chrome
+    driver: WebDriver
     usernameInput: WebElement
     passwordInput: WebElement
     codeInput: WebElement
     codeImg: WebElement
     loginButton: WebElement
     login_alter: WebElement
-    enableLogging: bool
     username: str
     password: str
     ocr: ddddocr.DdddOcr
@@ -208,10 +208,8 @@ class RUC_LOGIN:
         """
         global config
         # 使用 raw 配置读取器来避免 % 解析问题
-        config.read(INI_PATH, encoding="utf-8")
-        self.username = username or config.get("base", "username", raw=True)
-        self.password = password or config.get("base", "password", raw=True)
-        self.enableLogging = config["base"].getboolean("enableLogging")
+        self.username = username or config["base"]["username"]
+        self.password = password or config["base"]["password"]
 
         if domain.startswith("v"):
             url = r"https://v.ruc.edu.cn/auth/login"
@@ -225,7 +223,7 @@ class RUC_LOGIN:
                 try:
                     ele.click()
                 except ElementClickInterceptedException:
-                    self.driver.implicitly_wait(0.1)
+                    sleep(0.1)
                     continue
                 break
             return ele
@@ -233,25 +231,17 @@ class RUC_LOGIN:
         # self.usernameInput = self.driver.find_element(
         #     By.XPATH, "/html/body/div/form/div[3]/input"
         # )
-        self.usernameInput = try_click(By.XPATH, "/html/body/div/form/div[3]/input")
+        self.usernameInput = try_click(By.CSS_SELECTOR, 'input[name="username"]')
         self.passwordInput = self.driver.find_element(
-            By.XPATH, "/html/body/div/form/div[4]/input"
+            By.CSS_SELECTOR, 'input[name="password"]'
         )
-        self.codeInput = self.driver.find_element(
-            By.XPATH, "/html/body/div/form/div[6]/input"
-        )
-        self.codeImg = self.driver.find_element(
-            By.XPATH, "/html/body/div/form/div[7]/img"
-        )
-        self.loginButton = self.driver.find_element(
-            By.XPATH, "/html/body/div/form/div[12]/button"
-        )
+        self.codeInput = self.driver.find_element(By.CSS_SELECTOR, 'input[name="code"]')
+        self.codeImg = self.driver.find_element(By.CSS_SELECTOR, "#codeImg")
+        self.loginButton = self.driver.find_element(By.CSS_SELECTOR, "#login-submit")
         self.login_alter = self.driver.find_element(
-            By.XPATH, "/html/body/div/form/div[11]"
+            By.CSS_SELECTOR, "#login-alert"
         )  # This element show the login failed reason, like "验证码不正确或已失效,请重试！"
-        self.rememberMe = self.driver.find_element(
-            By.XPATH, "/html/body/div/form/div[13]/span[1]/div"
-        ).click()
+        self.rememberMe = self.driver.find_element(By.CSS_SELECTOR, ".checkbox").click()
         self.lst_img = None
         self.lst_status = self.current_status()
 
@@ -293,13 +283,12 @@ class RUC_LOGIN:
         it only returns when the result is looks like a valid code(4 letters).
         """
 
-        def is_valid_result(ocrRes: str):
+        def is_valid_result(ocrRes):
+            assert isinstance(ocrRes, str), "OCR result must be a string"
             if len(ocrRes) != 4:
                 return False
             for c in ocrRes:
-                if not (
-                    ord("a") <= ord(c) <= ord("z") or ord("A") <= ord(c) <= ord("Z")
-                ):
+                if not c.isalpha():
                     return False
             return True
 
@@ -310,7 +299,7 @@ class RUC_LOGIN:
             if not is_valid_result(ocrRes):
                 self.codeImg.click()
             else:
-                return ocrRes, img
+                return ocrRes
         raise TimeoutError("OCR failed")
 
     def try_login(self):
@@ -324,7 +313,7 @@ class RUC_LOGIN:
 
         self.usernameInput.send_keys(self.username)
         self.passwordInput.send_keys(self.password)
-        ocrRes, img = self.do_ocr()
+        ocrRes = self.do_ocr()
         self.codeInput.send_keys(ocrRes)
 
         self.loginButton.click()
@@ -341,21 +330,15 @@ class RUC_LOGIN:
             return False
         elif status_msg and "用户不存在" in status_msg:
             raise ValueError(
-                "用户不存在：\nusername: {}\tpassword：see {}".format(
-                    self.username, INI_PATH
-                )
+                f"用户不存在：\nusername: {self.username}\tpassword：see {INI_PATH}"
             )
         elif status_msg and "用户名或密码不正确" in status_msg:
             raise ValueError(
-                "用户名或密码不正确：\nusername: {}\tpassword：see {}".format(
-                    self.username, INI_PATH
-                )
+                f"用户名或密码不正确：\nusername: {self.username}\tpassword：see {INI_PATH}"
             )
         elif status_msg:
             # 避免直接使用可能包含%的文本
-            raise ValueError(
-                "Login failed, raw status msg: {}".format(repr(status_msg))
-            )
+            raise ValueError(f"Login failed, raw status msg: {repr(status_msg)}")
         return True
 
     def get_cookies(self, domain="v"):
